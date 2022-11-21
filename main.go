@@ -18,9 +18,9 @@ func main(){
     go DBInsert(pid+1, &wg)
     go DBInsert(pid+2, &wg)
 
-    fmt.Println("Waiting for goroutines to finish...")
+    fmt.Println("Waiting for goroutines to finish... ")
     wg.Wait()
-    fmt.Println("Done!")
+    fmt.Println("Done! ")
 
 }
 
@@ -56,12 +56,13 @@ func DBInsert(pid int, wg *sync.WaitGroup) {
     defer stmtOut.Close()
 
     // Insert square numbers for 0-24 in the database
-    for i := 0; i < 20000; i++ {
-        _, err = stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
-        if err != nil {
-            panic(err.Error()) // proper error handling instead of panic in your app
-        }
-    }
+    InsertData(stmtIns, pid, 30000 )
+//    for i := 0; i < 20000; i++ {
+//        _, err = stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
+//        if err != nil {
+//            panic(err.Error()) // proper error handling instead of panic in your app
+//        }
+//    }
 
     var squareNum int // we "scan" the result in here
 
@@ -70,7 +71,7 @@ func DBInsert(pid int, wg *sync.WaitGroup) {
     if err != nil {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
-    fmt.Printf("The square number of 13 is: %d", squareNum)
+    fmt.Printf("The square number of 13 is: %d \n", squareNum)
 
     // Query another number.. 1 maybe?
     err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
@@ -78,5 +79,21 @@ func DBInsert(pid int, wg *sync.WaitGroup) {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
 
-    fmt.Printf("The square number of 1 is: %d", squareNum)
+    fmt.Printf("The square number of 1 is: %d \n", squareNum)
+}
+
+func InsertData(stmtIns *sql.Stmt, pid int, loop int) {
+    defer func() {
+        fmt.Printf("Failed to insert the data \n")
+        if r := recover(); r != nil {
+//            fmt.Println("Recovered in f", r)
+            fmt.Printf("Failed to run the query in the InsertData \n\n\n")
+        }
+    }()
+    for i := 0; i < loop; i++ {
+        _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
+        if err != nil {
+            panic(err.Error()) // proper error handling instead of panic in your app
+        }
+    }
 }

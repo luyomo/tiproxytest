@@ -7,28 +7,36 @@ import (
     "time"
     "sync"
     _ "github.com/go-sql-driver/mysql"
+    "github.com/luyomo/tisample/pkg/tui"
 )
+
+
+var LK = sync.RWMutex{}
 
 func main(){
     fmt.Printf("Hello world. \n")
     pid := os.Getpid()
 
+    retry := 0
     var wg sync.WaitGroup
     wg.Add(2)
-    go DBInsert(pid+1, &wg)
-    go DBInsert(pid+2, &wg)
+    go DBInsert(pid+1, &wg, &retry)
+    go DBInsert(pid+2, &wg, &retry)
+
 
     fmt.Println("Waiting for goroutines to finish... ")
     wg.Wait()
+    fmt.Printf("Retried : <%d>\n", retry)
     fmt.Println("Done! ")
 
+    tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
+    tableOutput = append(tableOutput, []string{"200000", "200000", "20 second", "3", "2", "3"} )
+    tui.PrintTable(tableOutput, true)
 }
 
-func DBInsert(pid int, wg *sync.WaitGroup) {
-    defer wg.Done()
-
-    db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
-    // db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
+func PrepareDBConn() (error, *sql.DB, *sql.Stmt, *sql.Stmt) {
+    //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
+    db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
     if err != nil {
         panic(err)
     }
@@ -46,23 +54,25 @@ func DBInsert(pid int, wg *sync.WaitGroup) {
     if err != nil {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
-    defer stmtIns.Close() // Close the statement when we leave main() / the program terminates
+ //   defer stmtIns.Close() // Close the statement when we leave main() / the program terminates
 
     // Prepare statement for reading data
     stmtOut, err := db.Prepare("SELECT squareNumber FROM squarenum WHERE number = ?")
     if err != nil {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
-    defer stmtOut.Close()
+//    defer stmtOut.Close()
+
+    return nil, db, stmtIns, stmtOut 
+}
+
+func DBInsert(pid int, wg *sync.WaitGroup, _retry *int) {
+    defer wg.Done()
+
+    err, _, stmtIns, stmtOut := PrepareDBConn()
 
     // Insert square numbers for 0-24 in the database
-    InsertData(stmtIns, pid, 30000 )
-//    for i := 0; i < 20000; i++ {
-//        _, err = stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
-//        if err != nil {
-//            panic(err.Error()) // proper error handling instead of panic in your app
-//        }
-//    }
+    InsertData(stmtIns, stmtOut, pid, _retry,  100000)
 
     var squareNum int // we "scan" the result in here
 
@@ -82,18 +92,30 @@ func DBInsert(pid int, wg *sync.WaitGroup) {
     fmt.Printf("The square number of 1 is: %d \n", squareNum)
 }
 
-func InsertData(stmtIns *sql.Stmt, pid int, loop int) {
-    defer func() {
-        fmt.Printf("Failed to insert the data \n")
-        if r := recover(); r != nil {
-//            fmt.Println("Recovered in f", r)
-            fmt.Printf("Failed to run the query in the InsertData \n\n\n")
-        }
-    }()
+func InsertData(stmtIns *sql.Stmt, stmtOut *sql.Stmt, pid int, _pRetry *int,  loop int) {
+//    defer func() {
+//        fmt.Printf("Failed to insert the data \n")
+//        if r := recover(); r != nil {
+////            fmt.Println("Recovered in f", r)
+//            fmt.Printf("Failed to run the query in the InsertData \n\n\n")
+//        }
+//    }()
     for i := 0; i < loop; i++ {
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
-            panic(err.Error()) // proper error handling instead of panic in your app
+            if err.Error() == "invalid connection"{
+                err, _, stmtIns, stmtOut = PrepareDBConn()
+		if err != nil {
+                    panic(err)
+	        }
+		i = i - 1
+		LK.Lock()
+		*_pRetry = *_pRetry + 1
+		LK.Unlock()
+	    } else{
+                fmt.Printf("The error is <%s>\n\n\n", err.Error())
+                panic(err.Error()) // proper error handling instead of panic in your app
+	    }
         }
     }
 }

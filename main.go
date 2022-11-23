@@ -10,6 +10,7 @@ import (
     "sync"
     "regexp"
     "os/exec"
+    "strconv"
 
     _ "github.com/go-sql-driver/mysql"
     "github.com/luyomo/tisample/pkg/tui"
@@ -33,11 +34,12 @@ func main(){
     ctx, cancel := context.WithCancel(context.Background())
 
     retry := 0
+    numRestart := 0
     var wg sync.WaitGroup
     wg.Add(2)
     go DBInsert(pid+1, &wg, &retry)
     go DBInsert(pid+2, &wg, &retry)
-    go RestartTiDBCluster(ctx)
+    go RestartTiDBCluster(ctx, &numRestart)
 
 
     fmt.Println("Waiting for goroutines to finish... ")
@@ -48,11 +50,11 @@ func main(){
     fmt.Println("Done! ")
 
     tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
-    tableOutput = append(tableOutput, []string{"200000", "200000", "20 second", "3", "2", "3"} )
+    tableOutput = append(tableOutput, []string{"200000", "200000", "20 second", strconv.Itoa(retry) , "2", strconv.Itoa(numRestart)} )
     tui.PrintTable(tableOutput, true)
 }
 
-func RestartTiDBCluster(ctx context.Context) {
+func RestartTiDBCluster(ctx context.Context, numRestart *int) {
     var tidbIPs []string
     client, err := clientv3.New(clientv3.Config{Endpoints:   []string{"182.83.1.86:2379"}  })
     if err != nil {
@@ -90,14 +92,16 @@ func RestartTiDBCluster(ctx context.Context) {
     for {
          select {
              case <-ticker.C:
-                 fmt.Printf("Starting to restart TiDB Node \n\n\n")
                  tidbIPs = append(tidbIPs[1:], tidbIPs[0])
 
+                 fmt.Printf("Starting to restart TiDB Node<%s> \n", tidbIPs[0])
                  cmd := exec.Command("/home/admin/.tiup/bin/tiup", "cluster", "restart", "mgtest", "-y", "--node", fmt.Sprintf("%s:4000", tidbIPs[0]))
                  err := cmd.Run()
                  if err != nil {
                      fmt.Printf("The error is <%s> \n", err.Error())
+		     panic(err)
                  }
+		 *numRestart = *numRestart + 1
              case <-ctx.Done():
                  fmt.Printf("Starting to stop all the instances \n\n\n")
                  return
@@ -114,8 +118,8 @@ func componentFromJSON(str string) (s Component, err error) {
 }
 
 func PrepareDBConn() (error, *sql.DB, *sql.Stmt, *sql.Stmt) {
-    //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
-    db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
+    db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
+    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
     if err != nil {
         panic(err)
     }
@@ -150,7 +154,7 @@ func DBInsert(pid int, wg *sync.WaitGroup, _retry *int) {
     err, _, stmtIns, stmtOut := PrepareDBConn()
 
     // Insert square numbers for 0-24 in the database
-    InsertData(stmtIns, stmtOut, pid, _retry,  100000)
+    InsertData(stmtIns, stmtOut, pid, _retry,  80000)
 
     var squareNum int // we "scan" the result in here
 
@@ -164,24 +168,28 @@ func DBInsert(pid int, wg *sync.WaitGroup, _retry *int) {
     // Query another number.. 1 maybe?
     err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
     if err != nil {
-        panic(err.Error()) // proper error handling instead of panic in your app
+        if err.Error() == "invalid connection"{
+            fmt.Printf("Starting to re-connect the DB \n\n\n")
+            err, _, stmtIns, stmtOut = PrepareDBConn()
+            if err != nil  {
+                panic(err)
+            }
+
+            err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
+        } else{
+            panic(err.Error()) // proper error handling instead of panic in your app
+        }
     }
 
     fmt.Printf("The square number of 1 is: %d \n", squareNum)
 }
 
 func InsertData(stmtIns *sql.Stmt, stmtOut *sql.Stmt, pid int, _pRetry *int,  loop int) {
-//    defer func() {
-//        fmt.Printf("Failed to insert the data \n")
-//        if r := recover(); r != nil {
-////            fmt.Println("Recovered in f", r)
-//            fmt.Printf("Failed to run the query in the InsertData \n\n\n")
-//        }
-//    }()
     for i := 0; i < loop; i++ {
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
             if err.Error() == "invalid connection"{
+                fmt.Printf("Starting to re-connect the DB \n\n\n")
                 err, _, stmtIns, stmtOut = PrepareDBConn()
 		if err != nil {
                     panic(err)

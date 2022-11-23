@@ -29,16 +29,20 @@ func main(){
     fmt.Printf("Hello world. \n")
     pid := os.Getpid()
 
-    // RestartTiDBCluster()
+    PreProcess()
 
     ctx, cancel := context.WithCancel(context.Background())
 
+    threads := 2
     retry := 0
     numRestart := 0
+    numRows := 60000
+    insertRow := 0
     var wg sync.WaitGroup
-    wg.Add(2)
-    go DBInsert(pid+1, &wg, &retry)
-    go DBInsert(pid+2, &wg, &retry)
+    wg.Add(threads)
+    for idx:=0; idx< threads; idx++{
+      go DBInsert(pid+idx+1, numRows, &wg, &retry)
+    }
     go RestartTiDBCluster(ctx, &numRestart)
 
 
@@ -49,8 +53,10 @@ func main(){
     fmt.Printf("Retried : <%d>\n", retry)
     fmt.Println("Done! ")
 
+    PostProcess(&insertRow)
+
     tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
-    tableOutput = append(tableOutput, []string{"200000", "200000", "20 second", strconv.Itoa(retry) , "2", strconv.Itoa(numRestart)} )
+    tableOutput = append(tableOutput, []string{strconv.Itoa(numRows * threads), strconv.Itoa(insertRow), "20 second", strconv.Itoa(retry) , strconv.Itoa(threads), strconv.Itoa(numRestart)} )
     tui.PrintTable(tableOutput, true)
 }
 
@@ -61,8 +67,6 @@ func RestartTiDBCluster(ctx context.Context, numRestart *int) {
         panic(err)
     }
 
-//    ctx, cancel := context.WithTimeout(client.Ctx(), 10 * time.Second)
-//    defer cancel()
     members , err := client.MemberList(ctx)
     if err != nil {
         panic(err)
@@ -117,7 +121,58 @@ func componentFromJSON(str string) (s Component, err error) {
     return
 }
 
-func PrepareDBConn() (error, *sql.DB, *sql.Stmt, *sql.Stmt) {
+func PreProcess() {
+    db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
+    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
+    if err != nil {
+        panic(err)
+    }
+    defer db.Close()
+
+    db.SetConnMaxLifetime(time.Minute * 3)
+    db.SetMaxOpenConns(10)
+    db.SetMaxIdleConns(10)
+
+    _, err = db.Exec("truncate table squareNum") // ? = placeholder
+    if err != nil {
+        panic(err.Error()) // proper error handling instead of panic in your app
+    }
+}
+
+func PostProcess(insertRow *int) {
+    db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
+    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
+    if err != nil {
+        panic(err)
+    }
+    defer db.Close()
+
+    db.SetConnMaxLifetime(time.Minute * 3)
+    db.SetMaxOpenConns(10)
+    db.SetMaxIdleConns(10)
+
+    stmtOut, err := db.Prepare("SELECT count(*) FROM squarenum")
+    if err != nil {
+        panic(err.Error()) // proper error handling instead of panic in your app
+    }
+
+    err = stmtOut.QueryRow().Scan(insertRow) // WHERE number = 1
+    if err != nil {
+        if err.Error() == "invalid connection"{
+            fmt.Printf("Starting to re-connect the DB \n\n\n")
+            err, _, _, _, stmtOut = PrepareDBConn()
+            if err != nil  {
+                panic(err)
+            }
+
+            err = stmtOut.QueryRow(1).Scan(insertRow) // WHERE number = 1
+        } else{
+            panic(err.Error()) // proper error handling instead of panic in your app
+        }
+    }
+}
+
+func PrepareDBConn() (error, *sql.DB, *sql.Stmt,  *sql.Stmt, *sql.Stmt) {
     db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
     //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
     if err != nil {
@@ -138,50 +193,51 @@ func PrepareDBConn() (error, *sql.DB, *sql.Stmt, *sql.Stmt) {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
 
+    stmtTruncate, err := db.Prepare("truncate table squareNum") // ? = placeholder
+    if err != nil {
+        panic(err.Error()) // proper error handling instead of panic in your app
+    }
+
     // Prepare statement for reading data
-    stmtOut, err := db.Prepare("SELECT squareNumber FROM squarenum WHERE number = ?")
+    stmtOut, err := db.Prepare("SELECT count(*) FROM squarenum")
     if err != nil {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
 //    defer stmtOut.Close()
 
-    return nil, db, stmtIns, stmtOut 
+    return nil, db, stmtTruncate, stmtIns, stmtOut 
 }
 
-func DBInsert(pid int, wg *sync.WaitGroup, _retry *int) {
+func DBInsert(pid, numRows int, wg *sync.WaitGroup, _retry *int) {
     defer wg.Done()
 
-    err, _, stmtIns, stmtOut := PrepareDBConn()
+    err, _, _, stmtIns, stmtOut := PrepareDBConn()
+    if err != nil {
+        panic(err)
+    }
 
     // Insert square numbers for 0-24 in the database
-    InsertData(stmtIns, stmtOut, pid, _retry,  80000)
+    InsertData(stmtIns, stmtOut, pid, _retry, numRows)
 
-    var squareNum int // we "scan" the result in here
-
-    // Query the square-number of 13
-    err = stmtOut.QueryRow(13).Scan(&squareNum) // WHERE number = 13
-    if err != nil {
-        panic(err.Error()) // proper error handling instead of panic in your app
-    }
-    fmt.Printf("The square number of 13 is: %d \n", squareNum)
-
-    // Query another number.. 1 maybe?
-    err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
-    if err != nil {
-        if err.Error() == "invalid connection"{
-            fmt.Printf("Starting to re-connect the DB \n\n\n")
-            err, _, stmtIns, stmtOut = PrepareDBConn()
-            if err != nil  {
-                panic(err)
-            }
-
-            err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
-        } else{
-            panic(err.Error()) // proper error handling instead of panic in your app
-        }
-    }
-
-    fmt.Printf("The square number of 1 is: %d \n", squareNum)
+//    var squareNum int // we "scan" the result in here
+//
+//    // Query another number.. 1 maybe?
+//    err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
+//    if err != nil {
+//        if err.Error() == "invalid connection"{
+//            fmt.Printf("Starting to re-connect the DB \n\n\n")
+//            err, _, _, stmtIns, stmtOut = PrepareDBConn()
+//            if err != nil  {
+//                panic(err)
+//            }
+//
+//            err = stmtOut.QueryRow(1).Scan(&squareNum) // WHERE number = 1
+//        } else{
+//            panic(err.Error()) // proper error handling instead of panic in your app
+//        }
+//    }
+//
+//    fmt.Printf("The square number of 1 is: %d \n", squareNum)
 }
 
 func InsertData(stmtIns *sql.Stmt, stmtOut *sql.Stmt, pid int, _pRetry *int,  loop int) {
@@ -190,7 +246,7 @@ func InsertData(stmtIns *sql.Stmt, stmtOut *sql.Stmt, pid int, _pRetry *int,  lo
         if err != nil {
             if err.Error() == "invalid connection"{
                 fmt.Printf("Starting to re-connect the DB \n\n\n")
-                err, _, stmtIns, stmtOut = PrepareDBConn()
+                err, _,_, stmtIns, stmtOut = PrepareDBConn()
 		if err != nil {
                     panic(err)
 	        }

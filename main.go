@@ -39,6 +39,7 @@ func main(){
     numRows := 60000
     insertRow := 0
     var wg sync.WaitGroup
+    _startTime := time.Now()
     wg.Add(threads)
     for idx:=0; idx< threads; idx++{
       go DBInsert(pid+idx+1, numRows, &wg, &retry)
@@ -52,11 +53,14 @@ func main(){
     cancel()
     fmt.Printf("Retried : <%d>\n", retry)
     fmt.Println("Done! ")
+    _elapsed := time.Since(_startTime)
 
     PostProcess(&insertRow)
+    strDuration := fmt.Sprintf("%v", _elapsed)
+    fmt.Printf("The elapsed time is <%s> \n", strDuration)
 
     tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
-    tableOutput = append(tableOutput, []string{strconv.Itoa(numRows * threads), strconv.Itoa(insertRow), "20 second", strconv.Itoa(retry) , strconv.Itoa(threads), strconv.Itoa(numRestart)} )
+    tableOutput = append(tableOutput, []string{strconv.Itoa(numRows * threads), strconv.Itoa(insertRow), strDuration , strconv.Itoa(retry) , strconv.Itoa(threads), strconv.Itoa(numRestart)} )
     tui.PrintTable(tableOutput, true)
 }
 

@@ -16,6 +16,8 @@ import (
 
     _ "github.com/go-sql-driver/mysql"
     "github.com/luyomo/tisample/pkg/tui"
+    "github.com/luyomo/tisample/pkg/tui/progress"
+
     clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -32,12 +34,20 @@ type Arguments struct {
     DBPort int
     DBPassword string
     DBName string
+
     PDHost string
     PDPort int
+
     Threads int
     Rows int
     Interval int
     Message string
+}
+
+type Status struct {
+    InsertedRow int
+    NumOfTiDBRestart int
+    NumOfRetry int
 }
 
 func main(){
@@ -71,6 +81,27 @@ func main(){
     c := color.New(color.FgCyan).Add(color.Underline).Add(color.Bold)
     c.Println(fmt.Sprintf("\n\n          %s           \n\n", arguments.Message) )
 
+    fmt.Printf("Hello come here \n")
+
+    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa(arguments.Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
+
+    var testStatus Status
+    testStatus.InsertedRow = 0
+    testStatus.NumOfTiDBRestart = 0
+    testStatus.NumOfRetry = 0
+
+    var progressBar progress.Bar
+    // progressBar = progress.NewSingleBar("Data insertion: 0/20000, Number of TiDB restart: 0, Client re-connect: 0")'w
+    progressBar = progress.NewSingleBar(fmt.Sprintf(displayMsg, 0, 0, 0))
+    if singleBar, ok := progressBar.(*progress.SingleBar); ok {
+        singleBar.StartRenderLoop()
+    } 
+    //time.Sleep(10 * time.Second)
+    //progressBar.UpdateDisplay(&progress.DisplayProps{
+    //    Prefix: "Data insertion: 10000/20000, Number of TiDB restart: 3, Client re-connect: 0",
+    //}) 
+ //   time.Sleep(10 * time.Second)
+
 //    fmt.Printf("\n\n")
 //    color.Cyan(fmt.Sprintf("\n\n          %s \n\n", arguments.Message) )
     // fmt.Printf("The db user is <%s> \n", arguments.DBUser)
@@ -90,22 +121,23 @@ func main(){
     ctx, cancel := context.WithCancel(context.Background())
 
     threads := 2
-    retry := 0
-    numRestart := 0
     insertRow := 0
     var wg sync.WaitGroup
     _startTime := time.Now()
     wg.Add(threads)
     for idx:=0; idx< threads; idx++{
-      go DBInsert(&arguments, pid+idx+1, &wg, &retry)
+      go DBInsert(&arguments, pid+idx+1, &wg, &progressBar, &displayMsg, &testStatus)
     }
-    go RestartTiDBCluster(ctx, &arguments, &numRestart)
+    go RestartTiDBCluster(ctx, &arguments, &progressBar, &displayMsg, &testStatus )
 
 
     //fmt.Println("Waiting for goroutines to finish... ")
     wg.Wait()
     //fmt.Printf("Starting to cancel all the processes \n\n\n")
     cancel()
+    if singleBar, ok := progressBar.(*progress.SingleBar); ok {
+        singleBar.StopRenderLoop()
+    }  
     //fmt.Printf("Retried : <%d>\n", retry)
     //fmt.Println("Done! ")
     _elapsed := time.Since(_startTime)
@@ -115,11 +147,11 @@ func main(){
     //fmt.Printf("The elapsed time is <%s> \n", strDuration)
 
     tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
-    tableOutput = append(tableOutput, []string{strconv.Itoa(arguments.Rows * threads), strconv.Itoa(insertRow), strDuration , strconv.Itoa(retry) , strconv.Itoa(threads), strconv.Itoa(numRestart)} )
+    tableOutput = append(tableOutput, []string{strconv.Itoa(arguments.Rows * arguments.Threads), strconv.Itoa(insertRow), strDuration , strconv.Itoa(testStatus.NumOfRetry) , strconv.Itoa(threads), strconv.Itoa(testStatus.NumOfTiDBRestart)} )
     tui.PrintTable(tableOutput, true)
 }
 
-func RestartTiDBCluster(ctx context.Context, args *Arguments, numRestart *int) {
+func RestartTiDBCluster(ctx context.Context, args *Arguments, progressBar *progress.Bar, displayMsg *string, testStatus *Status ) {
     if (*args).Interval == 0 {
         return
     }
@@ -167,7 +199,10 @@ func RestartTiDBCluster(ctx context.Context, args *Arguments, numRestart *int) {
                      //fmt.Printf("The error is <%s> \n", err.Error())
 		     panic(err)
                  }
-		 *numRestart = *numRestart + 1
+                 (*testStatus).NumOfTiDBRestart = (*testStatus).NumOfTiDBRestart + 1
+                 (*progressBar).UpdateDisplay(&progress.DisplayProps{
+                     Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow, (*testStatus).NumOfTiDBRestart, (*testStatus).NumOfRetry),
+                 }) 
              case <-ctx.Done():
                  //fmt.Printf("Starting to stop all the instances \n\n\n")
                  return
@@ -261,7 +296,7 @@ func PrepareDBConn(args *Arguments) (error, *sql.Stmt) {
     return nil, stmtIns 
 }
 
-func DBInsert(args *Arguments, pid int, wg *sync.WaitGroup, _retry *int) {
+func DBInsert(args *Arguments, pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string, testStatus *Status) {
     defer wg.Done()
 
     err, stmtIns := PrepareDBConn(args)
@@ -272,6 +307,12 @@ func DBInsert(args *Arguments, pid int, wg *sync.WaitGroup, _retry *int) {
     // Insert square numbers for 0-24 in the database
 
     for i := 0; i < (*args).Rows ; i++ {
+        if i%10000 == 0 {
+            (*testStatus).InsertedRow = i
+            (*progressBar).UpdateDisplay(&progress.DisplayProps{
+                Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow,(*testStatus).NumOfTiDBRestart,   (*testStatus).NumOfRetry ),
+            }) 
+        }
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
             if err.Error() == "invalid connection"{
@@ -282,8 +323,12 @@ func DBInsert(args *Arguments, pid int, wg *sync.WaitGroup, _retry *int) {
 	        }
 		i = i - 1
 		LK.Lock()
-		*_retry = *_retry + 1
+                (*testStatus).NumOfRetry = (*testStatus).NumOfRetry + 1
+                (*progressBar).UpdateDisplay(&progress.DisplayProps{
+                    Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow,(*testStatus).NumOfTiDBRestart,   (*testStatus).NumOfRetry ),
+                }) 
 		LK.Unlock()
+
 	    } else{
                 //fmt.Printf("The error is <%s>\n\n\n", err.Error())
                 panic(err.Error()) // proper error handling instead of panic in your app

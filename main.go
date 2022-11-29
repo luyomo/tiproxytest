@@ -29,26 +29,32 @@ type Component struct {
 }
 
 type Arguments struct {
-    DBUser string
-    DBHost string
-    DBPort int
+    DBUser     string
+    DBHost     string
+    DBPort     int
     DBPassword string
-    DBName string
+    DBName     string
 
-    PDHost string
-    PDPort int
+    PDHost     string
+    PDPort     int
 
-    Threads int
-    Rows int
-    Interval int
-    Message string
+    Threads    int
+    Rows       int
+    Interval   int
+    Message    string
+}
+
+type SessionInfo struct {
+    ID       int
+    Hostname string
 }
 
 type TiProxyTest struct {
-    Args *Arguments
-    InsertedRow int `default:0`
+    Args             *Arguments
+    InsertedRow      int `default:0`
     NumOfTiDBRestart int `default:0`
-    NumOfRetry int `default:0`
+    NumOfRetry       int `default:0`
+    LstSessionInfo   []*SessionInfo
 }
 
 func main(){
@@ -122,7 +128,7 @@ func (t *TiProxyTest) Execute() {
     var wg sync.WaitGroup
     wg.Add((*t.Args).Threads)
     for idx:=0; idx < (*t.Args).Threads; idx++{
-      go t.DBInsert(pid+idx+1, &wg, &progressBar, &displayMsg)
+      go t.DBInsert(idx, pid+idx+1, &wg, &progressBar, &displayMsg)
     }
     go t.RestartTiDBCluster(ctx, &progressBar, &displayMsg)
 
@@ -222,7 +228,7 @@ func (t *TiProxyTest)PostProcess() {
     err = stmtOut.QueryRow().Scan(&t.InsertedRow) // WHERE number = 1
     if err != nil {
         if err.Error() == "invalid connection"{
-            err, stmtOut = t.PrepareDBConn()
+            err, stmtOut, _ = t.PrepareDBConn()
             if err != nil  {
                 panic(err)
             }
@@ -234,7 +240,7 @@ func (t *TiProxyTest)PostProcess() {
     }
 }
 
-func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt) {
+func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt, *sql.Stmt) {
     db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*t.Args).DBUser, (*t.Args).DBPassword, (*t.Args).DBHost, (*t.Args).DBPort, (*t.Args).DBName))
     if err != nil {
         panic(err)
@@ -249,29 +255,85 @@ func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt) {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
 
-    return nil, stmtIns 
+    stmtSelHost, err := db.Prepare("select @@hostname") // ? = placeholder
+    if err != nil {
+        panic(err.Error()) // proper error handling instead of panic in your app
+    }
+
+    return nil, stmtIns , stmtSelHost
 }
 
-func (t *TiProxyTest)DBInsert(pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string ) {
+func (t *TiProxyTest)SearchSessionInfo(sessionID int) *SessionInfo {
+    for _, sessionInfo := range t.LstSessionInfo {
+        if sessionID == (*sessionInfo).ID {
+            return sessionInfo
+        }
+    }
+    var sessionInfo SessionInfo
+    sessionInfo.ID = sessionID
+    t.LstSessionInfo = append(t.LstSessionInfo, &sessionInfo)
+
+    return &sessionInfo
+}
+
+func (t *TiProxyTest)PrintSessionInfo(sessionID int, stmtSelHost *sql.Stmt) error {
+    sessionInfo := t.SearchSessionInfo(sessionID)
+
+    var hostName string
+    err := stmtSelHost.QueryRow().Scan(&hostName) // WHERE number = 1
+    if err != nil {
+        return err
+    }
+
+    if hostName != (*sessionInfo).Hostname {
+        (*sessionInfo).Hostname = hostName
+        tableOutput := [][]string{{"SessionID", "Host Name" }}
+ 
+        for _, sessionInfo := range t.LstSessionInfo {
+            tableOutput = append(tableOutput, []string{ strconv.Itoa(sessionInfo.ID), sessionInfo.Hostname })
+        }
+
+        tui.PrintTable(tableOutput, true)
+        fmt.Printf("\n")
+    }
+    return nil
+}
+
+func (t *TiProxyTest)DBInsert(sessionID, pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string ) {
     defer wg.Done()
 
-    err, stmtIns := t.PrepareDBConn()
+    err, stmtIns, stmtSelHost := t.PrepareDBConn()
     if err != nil {
         panic(err)
     }
+
+    t.PrintSessionInfo(sessionID, stmtSelHost)
+    // fmt.Printf("The host Name is <%#v> \n\n\n\n", t.LstSessionInfo)
 
     for i := 0; i < (t.Args).Rows ; i++ {
         if i%10000 == 0 {
             t.InsertedRow = i
             (*progressBar).UpdateDisplay(&progress.DisplayProps{
                 Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
-            }) 
+            })
+            if err = t.PrintSessionInfo(sessionID, stmtSelHost); err != nil {
+                if err.Error() == "invalid connection"{
+                    err, stmtIns, stmtSelHost = t.PrepareDBConn()
+	            if err != nil {
+                        panic(err)
+	            }
+                    err = t.PrintSessionInfo(sessionID, stmtSelHost)
+                    if err != nil {
+                        panic(err)
+                    }
+                }
+            }
         }
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
             if err.Error() == "invalid connection"{
                 fmt.Printf("Starting to re-connect the DB \n\n\n")
-                err, stmtIns = t.PrepareDBConn()
+                err, stmtIns, _ = t.PrepareDBConn()
 		if err != nil {
                     panic(err)
 	        }

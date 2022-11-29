@@ -44,13 +44,35 @@ type Arguments struct {
     Message string
 }
 
-type Status struct {
-    InsertedRow int
-    NumOfTiDBRestart int
-    NumOfRetry int
+type TiProxyTest struct {
+    Args *Arguments
+    InsertedRow int `default:0`
+    NumOfTiDBRestart int `default:0`
+    NumOfRetry int `default:0`
 }
 
 func main(){
+    var insTiProxyTest TiProxyTest
+    insTiProxyTest.Args = initArgs()
+
+    insTiProxyTest.PreProcess()
+
+    _startTime := time.Now()
+    insTiProxyTest.Execute()
+    _elapsed := time.Since(_startTime)
+
+    insTiProxyTest.PostProcess()
+
+    strDuration := fmt.Sprintf("%v", _elapsed)
+
+    tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
+    tableOutput = append(tableOutput, []string{strconv.Itoa((*insTiProxyTest.Args).Rows * (*insTiProxyTest.Args).Threads), strconv.Itoa(insTiProxyTest.InsertedRow), strDuration , strconv.Itoa(insTiProxyTest.NumOfRetry) , strconv.Itoa((*insTiProxyTest.Args).Threads), strconv.Itoa(insTiProxyTest.NumOfTiDBRestart)} )
+    tui.PrintTable(tableOutput, true)
+
+    return
+}
+
+func initArgs() *Arguments {
     var arguments Arguments
     flag.StringVar(&arguments.DBUser, "db-user", "root", "db connection user. default: root")
     flag.StringVar(&arguments.DBHost, "db-host", "127.0.0.1", "db connection host. default: 127.0.0.1")
@@ -78,57 +100,32 @@ func main(){
     tableArgs = append(tableArgs, []string{"Interval to restart TiDB(seconds)", strconv.Itoa(arguments.Interval), "Restart TiDB node at the interval" })
     tui.PrintTable(tableArgs, true)
 
+    return &arguments
+}
+
+func (t *TiProxyTest) Execute() {
     c := color.New(color.FgCyan).Add(color.Underline).Add(color.Bold)
-    c.Println(fmt.Sprintf("\n\n          %s           \n\n", arguments.Message) )
+    c.Println(fmt.Sprintf("\n\n          %s           \n\n", (*(*t).Args).Message) )
 
-    fmt.Printf("Hello come here \n")
-
-    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa(arguments.Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
-
-    var testStatus Status
-    testStatus.InsertedRow = 0
-    testStatus.NumOfTiDBRestart = 0
-    testStatus.NumOfRetry = 0
+    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa((*(*t).Args).Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
 
     var progressBar progress.Bar
-    // progressBar = progress.NewSingleBar("Data insertion: 0/20000, Number of TiDB restart: 0, Client re-connect: 0")'w
     progressBar = progress.NewSingleBar(fmt.Sprintf(displayMsg, 0, 0, 0))
     if singleBar, ok := progressBar.(*progress.SingleBar); ok {
         singleBar.StartRenderLoop()
     } 
-    //time.Sleep(10 * time.Second)
-    //progressBar.UpdateDisplay(&progress.DisplayProps{
-    //    Prefix: "Data insertion: 10000/20000, Number of TiDB restart: 3, Client re-connect: 0",
-    //}) 
- //   time.Sleep(10 * time.Second)
-
-//    fmt.Printf("\n\n")
-//    color.Cyan(fmt.Sprintf("\n\n          %s \n\n", arguments.Message) )
-    // fmt.Printf("The db user is <%s> \n", arguments.DBUser)
-    // fmt.Printf("The db host is <%s> \n", arguments.DBHost)
-    // fmt.Printf("The db port is <%d> \n", arguments.DBPort)
-    // fmt.Printf("The db password is <%s> \n", arguments.DBPassword)
-    // fmt.Printf("The pd host is <%s> \n", arguments.PDHost)
-    // fmt.Printf("The pd port is <%d> \n", arguments.PDPort)
-    // fmt.Printf("The thread is <%d> \n", arguments.Threads)
-    // fmt.Printf("The rows is <%d> \n", arguments.Rows)
-    // fmt.Printf("The interval is <%d> \n", arguments.Interval)
 
     pid := os.Getpid()
 
-    PreProcess(&arguments)
-
     ctx, cancel := context.WithCancel(context.Background())
 
-    threads := 2
-    insertRow := 0
     var wg sync.WaitGroup
-    _startTime := time.Now()
-    wg.Add(threads)
-    for idx:=0; idx< threads; idx++{
-      go DBInsert(&arguments, pid+idx+1, &wg, &progressBar, &displayMsg, &testStatus)
+    wg.Add((*(*t).Args).Threads)
+    for idx:=0; idx < (*(*t).Args).Threads; idx++{
+      fmt.Printf("Starting to run parallel \n")
+      go (*t).DBInsert(pid+idx+1, &wg, &progressBar, &displayMsg)
     }
-    go RestartTiDBCluster(ctx, &arguments, &progressBar, &displayMsg, &testStatus )
+    go (*t).RestartTiDBCluster(ctx, &progressBar, &displayMsg)
 
 
     //fmt.Println("Waiting for goroutines to finish... ")
@@ -138,25 +135,15 @@ func main(){
     if singleBar, ok := progressBar.(*progress.SingleBar); ok {
         singleBar.StopRenderLoop()
     }  
-    //fmt.Printf("Retried : <%d>\n", retry)
-    //fmt.Println("Done! ")
-    _elapsed := time.Since(_startTime)
-
-    PostProcess(&arguments, &insertRow)
-    strDuration := fmt.Sprintf("%v", _elapsed)
-    //fmt.Printf("The elapsed time is <%s> \n", strDuration)
-
-    tableOutput := [][]string{{"Expected Insert Row", "Actual Insert Row", "Execution Time", "# of Retry", "# of threads", "# of TiDB Restart"}}
-    tableOutput = append(tableOutput, []string{strconv.Itoa(arguments.Rows * arguments.Threads), strconv.Itoa(insertRow), strDuration , strconv.Itoa(testStatus.NumOfRetry) , strconv.Itoa(threads), strconv.Itoa(testStatus.NumOfTiDBRestart)} )
-    tui.PrintTable(tableOutput, true)
 }
 
-func RestartTiDBCluster(ctx context.Context, args *Arguments, progressBar *progress.Bar, displayMsg *string, testStatus *Status ) {
-    if (*args).Interval == 0 {
+func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context, progressBar *progress.Bar, displayMsg *string) {
+    if (*(*t).Args).Interval == 0 {
         return
     }
+    fmt.Printf("Starting to restart the tidb instance \n")
     var tidbIPs []string
-    client, err := clientv3.New(clientv3.Config{Endpoints:   []string{fmt.Sprintf("%s:%d", (*args).PDHost, (*args).PDPort) }  })
+    client, err := clientv3.New(clientv3.Config{Endpoints:   []string{fmt.Sprintf("%s:%d", (*(*t).Args).PDHost, (*(*t).Args).PDPort) }  })
     if err != nil {
         panic(err)
     }
@@ -185,7 +172,7 @@ func RestartTiDBCluster(ctx context.Context, args *Arguments, progressBar *progr
     }
 
     //fmt.Printf("The IP is <%#v> \n", tidbIPs)
-    ticker := time.NewTicker(time.Duration((*args).Interval) * time.Second)
+    ticker := time.NewTicker(time.Duration((*(*t).Args).Interval) * time.Second)
 
     for {
          select {
@@ -199,12 +186,12 @@ func RestartTiDBCluster(ctx context.Context, args *Arguments, progressBar *progr
                      //fmt.Printf("The error is <%s> \n", err.Error())
 		     panic(err)
                  }
-                 (*testStatus).NumOfTiDBRestart = (*testStatus).NumOfTiDBRestart + 1
+                 (*t).NumOfTiDBRestart = (*t).NumOfTiDBRestart + 1
                  (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                     Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow, (*testStatus).NumOfTiDBRestart, (*testStatus).NumOfRetry),
+                     Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart, (*t).NumOfRetry),
                  }) 
              case <-ctx.Done():
-                 //fmt.Printf("Starting to stop all the instances \n\n\n")
+                 fmt.Printf("Starting to stop all the instances \n\n\n")
                  return
          }
  
@@ -218,10 +205,10 @@ func componentFromJSON(str string) (s Component, err error) {
     return
 }
 
-func PreProcess(args *Arguments) {
+func (t *TiProxyTest)PreProcess() {
     //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
     //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*args).DBUser, (*args).DBPassword, (*args).DBHost, (*args).DBPort, (*args).DBName))
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
     if err != nil {
         panic(err)
     }
@@ -237,8 +224,8 @@ func PreProcess(args *Arguments) {
     }
 }
 
-func PostProcess(args *Arguments, insertRow *int) {
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*args).DBUser, (*args).DBPassword, (*args).DBHost, (*args).DBPort, (*args).DBName))
+func (t *TiProxyTest)PostProcess() {
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
     //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
     //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
     if err != nil {
@@ -255,33 +242,30 @@ func PostProcess(args *Arguments, insertRow *int) {
         panic(err.Error()) // proper error handling instead of panic in your app
     }
 
-    err = stmtOut.QueryRow().Scan(insertRow) // WHERE number = 1
+    err = stmtOut.QueryRow().Scan(&t.InsertedRow) // WHERE number = 1
     if err != nil {
         if err.Error() == "invalid connection"{
             //fmt.Printf("Starting to re-connect the DB \n\n\n")
-            err, stmtOut = PrepareDBConn(args)
+            err, stmtOut = (*t).PrepareDBConn()
             if err != nil  {
                 panic(err)
             }
 
-            err = stmtOut.QueryRow(1).Scan(insertRow) // WHERE number = 1
+            err = stmtOut.QueryRow(1).Scan(&t.InsertedRow) // WHERE number = 1
         } else{
             panic(err.Error()) // proper error handling instead of panic in your app
         }
     }
 }
 
-func PrepareDBConn(args *Arguments) (error, *sql.Stmt) {
+func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt) {
     //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
     //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*args).DBUser, (*args).DBPassword, (*args).DBHost, (*args).DBPort, (*args).DBName))
+    connStr := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName)
+    fmt.Printf("The connection string is <%s> \n", connStr)
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
     if err != nil {
         panic(err)
-    }
-
-    err = db.Ping()
-    if err != nil {
-        panic(err.Error()) // proper error handling instead of panic in your app
     }
 
     db.SetConnMaxLifetime(time.Minute * 3)
@@ -296,36 +280,37 @@ func PrepareDBConn(args *Arguments) (error, *sql.Stmt) {
     return nil, stmtIns 
 }
 
-func DBInsert(args *Arguments, pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string, testStatus *Status) {
+func (t *TiProxyTest)DBInsert(pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string ) {
+    fmt.Printf("Starting the DBInsert process ********* \n\n\n")
     defer wg.Done()
 
-    err, stmtIns := PrepareDBConn(args)
+    err, stmtIns := (*t).PrepareDBConn()
     if err != nil {
         panic(err)
     }
 
     // Insert square numbers for 0-24 in the database
 
-    for i := 0; i < (*args).Rows ; i++ {
+    for i := 0; i < (*(*t).Args).Rows ; i++ {
         if i%10000 == 0 {
-            (*testStatus).InsertedRow = i
+            (*t).InsertedRow = i
             (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow,(*testStatus).NumOfTiDBRestart,   (*testStatus).NumOfRetry ),
+                Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart, (*t).NumOfRetry ),
             }) 
         }
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
             if err.Error() == "invalid connection"{
                 fmt.Printf("Starting to re-connect the DB \n\n\n")
-                err, stmtIns = PrepareDBConn(args)
+                err, stmtIns = (*t).PrepareDBConn()
 		if err != nil {
                     panic(err)
 	        }
 		i = i - 1
 		LK.Lock()
-                (*testStatus).NumOfRetry = (*testStatus).NumOfRetry + 1
+                (*t).NumOfRetry = (*t).NumOfRetry + 1
                 (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                    Prefix: fmt.Sprintf(*displayMsg, (*testStatus).InsertedRow,(*testStatus).NumOfTiDBRestart,   (*testStatus).NumOfRetry ),
+                    Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart,  (*t).NumOfRetry ),
                 }) 
 		LK.Unlock()
 

@@ -55,6 +55,9 @@ type TiProxyTest struct {
     NumOfTiDBRestart int `default:0`
     NumOfRetry       int `default:0`
     LstSessionInfo   []*SessionInfo
+
+    ProgressBar      progress.Bar
+    DisplayMsg       string
 }
 
 func main(){
@@ -113,11 +116,10 @@ func (t *TiProxyTest) Execute() {
     c := color.New(color.FgCyan).Add(color.Underline).Add(color.Bold)
     c.Println(fmt.Sprintf("\n\n          %s           \n\n", (*t.Args).Message) )
 
-    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa((*t.Args).Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
+    t.DisplayMsg = "Data insertion/Per thread: %d/" + strconv.Itoa((*t.Args).Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
 
-    var progressBar progress.Bar
-    progressBar = progress.NewSingleBar(fmt.Sprintf(displayMsg, 0, 0, 0))
-    if singleBar, ok := progressBar.(*progress.SingleBar); ok {
+    t.ProgressBar = progress.NewSingleBar(fmt.Sprintf(t.DisplayMsg, 0, 0, 0))
+    if singleBar, ok := t.ProgressBar.(*progress.SingleBar); ok {
         singleBar.StartRenderLoop()
     } 
 
@@ -128,18 +130,18 @@ func (t *TiProxyTest) Execute() {
     var wg sync.WaitGroup
     wg.Add((*t.Args).Threads)
     for idx:=0; idx < (*t.Args).Threads; idx++{
-      go t.DBInsert(idx, pid+idx+1, &wg, &progressBar, &displayMsg)
+      go t.DBInsert(idx, pid+idx+1, &wg)
     }
-    go t.RestartTiDBCluster(ctx, &progressBar, &displayMsg)
+    go t.RestartTiDBCluster(ctx)
 
     wg.Wait()
     cancel()
-    if singleBar, ok := progressBar.(*progress.SingleBar); ok {
+    if singleBar, ok := t.ProgressBar.(*progress.SingleBar); ok {
         singleBar.StopRenderLoop()
     }  
 }
 
-func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context, progressBar *progress.Bar, displayMsg *string) {
+func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context) {
     if (*t.Args).Interval == 0 {
         return
     }
@@ -175,8 +177,8 @@ func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context, progressBar *progre
 		     panic(err)
                  }
                  t.NumOfTiDBRestart = t.NumOfTiDBRestart + 1
-                 (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                     Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry),
+                 t.ProgressBar.UpdateDisplay(&progress.DisplayProps{
+                     Prefix: fmt.Sprintf(t.DisplayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry),
                  }) 
              case <-ctx.Done():
                  fmt.Printf("Starting to stop all the instances \n\n\n")
@@ -228,7 +230,7 @@ func (t *TiProxyTest)PostProcess() {
     err = stmtOut.QueryRow().Scan(&t.InsertedRow) // WHERE number = 1
     if err != nil {
         if err.Error() == "invalid connection"{
-            err, stmtOut, _ = t.PrepareDBConn()
+            err, stmtOut, _ = t.PrepareDBConn(false)
             if err != nil  {
                 panic(err)
             }
@@ -240,7 +242,7 @@ func (t *TiProxyTest)PostProcess() {
     }
 }
 
-func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt, *sql.Stmt) {
+func (t *TiProxyTest)PrepareDBConn(countFlag bool) (error, *sql.Stmt, *sql.Stmt) {
     db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*t.Args).DBUser, (*t.Args).DBPassword, (*t.Args).DBHost, (*t.Args).DBPort, (*t.Args).DBName))
     if err != nil {
         panic(err)
@@ -249,6 +251,14 @@ func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt, *sql.Stmt) {
     db.SetConnMaxLifetime(time.Minute * 3)
     db.SetMaxOpenConns(10)
     db.SetMaxIdleConns(10)
+    if countFlag == true {
+        LK.Lock()
+        t.NumOfRetry = t.NumOfRetry + 1
+        t.ProgressBar.UpdateDisplay(&progress.DisplayProps{
+            Prefix: fmt.Sprintf(t.DisplayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
+        }) 
+        LK.Unlock()
+    }
 
     stmtIns, err := db.Prepare("INSERT INTO tiproxy_test VALUES( ?, ?, ? )") // ? = placeholder
     if err != nil {
@@ -299,10 +309,10 @@ func (t *TiProxyTest)PrintSessionInfo(sessionID int, stmtSelHost *sql.Stmt) erro
     return nil
 }
 
-func (t *TiProxyTest)DBInsert(sessionID, pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string ) {
+func (t *TiProxyTest)DBInsert(sessionID, pid int, wg *sync.WaitGroup) {
     defer wg.Done()
 
-    err, stmtIns, stmtSelHost := t.PrepareDBConn()
+    err, stmtIns, stmtSelHost := t.PrepareDBConn(false)
     if err != nil {
         panic(err)
     }
@@ -313,12 +323,12 @@ func (t *TiProxyTest)DBInsert(sessionID, pid int, wg *sync.WaitGroup, progressBa
     for i := 0; i < (t.Args).Rows ; i++ {
         if i%10000 == 0 {
             t.InsertedRow = i
-            (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
+            t.ProgressBar.UpdateDisplay(&progress.DisplayProps{
+                Prefix: fmt.Sprintf(t.DisplayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
             })
             if err = t.PrintSessionInfo(sessionID, stmtSelHost); err != nil {
                 if err.Error() == "invalid connection"{
-                    err, stmtIns, stmtSelHost = t.PrepareDBConn()
+                    err, stmtIns, stmtSelHost = t.PrepareDBConn(true)
 	            if err != nil {
                         panic(err)
 	            }
@@ -333,18 +343,11 @@ func (t *TiProxyTest)DBInsert(sessionID, pid int, wg *sync.WaitGroup, progressBa
         if err != nil {
             if err.Error() == "invalid connection"{
                 fmt.Printf("Starting to re-connect the DB \n\n\n")
-                err, stmtIns, _ = t.PrepareDBConn()
+                err, stmtIns, _ = t.PrepareDBConn(true)
 		if err != nil {
                     panic(err)
 	        }
 		i = i - 1
-		LK.Lock()
-                t.NumOfRetry = t.NumOfRetry + 1
-                (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                    Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
-                }) 
-		LK.Unlock()
-
 	    } else{
                 panic(err.Error()) // proper error handling instead of panic in your app
 	    }

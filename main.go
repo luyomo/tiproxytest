@@ -105,9 +105,9 @@ func initArgs() *Arguments {
 
 func (t *TiProxyTest) Execute() {
     c := color.New(color.FgCyan).Add(color.Underline).Add(color.Bold)
-    c.Println(fmt.Sprintf("\n\n          %s           \n\n", (*(*t).Args).Message) )
+    c.Println(fmt.Sprintf("\n\n          %s           \n\n", (*t.Args).Message) )
 
-    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa((*(*t).Args).Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
+    displayMsg := "Data insertion/Per thread: %d/" + strconv.Itoa((*t.Args).Rows) + ", Number of TiDB restart: %d, Client re-connect: %d"
 
     var progressBar progress.Bar
     progressBar = progress.NewSingleBar(fmt.Sprintf(displayMsg, 0, 0, 0))
@@ -120,17 +120,13 @@ func (t *TiProxyTest) Execute() {
     ctx, cancel := context.WithCancel(context.Background())
 
     var wg sync.WaitGroup
-    wg.Add((*(*t).Args).Threads)
-    for idx:=0; idx < (*(*t).Args).Threads; idx++{
-      fmt.Printf("Starting to run parallel \n")
-      go (*t).DBInsert(pid+idx+1, &wg, &progressBar, &displayMsg)
+    wg.Add((*t.Args).Threads)
+    for idx:=0; idx < (*t.Args).Threads; idx++{
+      go t.DBInsert(pid+idx+1, &wg, &progressBar, &displayMsg)
     }
-    go (*t).RestartTiDBCluster(ctx, &progressBar, &displayMsg)
+    go t.RestartTiDBCluster(ctx, &progressBar, &displayMsg)
 
-
-    //fmt.Println("Waiting for goroutines to finish... ")
     wg.Wait()
-    //fmt.Printf("Starting to cancel all the processes \n\n\n")
     cancel()
     if singleBar, ok := progressBar.(*progress.SingleBar); ok {
         singleBar.StopRenderLoop()
@@ -138,21 +134,14 @@ func (t *TiProxyTest) Execute() {
 }
 
 func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context, progressBar *progress.Bar, displayMsg *string) {
-    if (*(*t).Args).Interval == 0 {
+    if (*t.Args).Interval == 0 {
         return
     }
-    fmt.Printf("Starting to restart the tidb instance \n")
     var tidbIPs []string
-    client, err := clientv3.New(clientv3.Config{Endpoints:   []string{fmt.Sprintf("%s:%d", (*(*t).Args).PDHost, (*(*t).Args).PDPort) }  })
+    client, err := clientv3.New(clientv3.Config{Endpoints:   []string{fmt.Sprintf("%s:%d", (*t.Args).PDHost, (*t.Args).PDPort) }  })
     if err != nil {
         panic(err)
     }
-
-    //members , err := client.MemberList(ctx)
-    //if err != nil {
-    //    panic(err)
-    //}
-    //fmt.Printf("The members are <%#v> \n", members)
 
     kv := clientv3.NewKV(client)
     gr, _ := kv.Get(ctx, "/topology/tidb", clientv3.WithPrefix())
@@ -163,38 +152,30 @@ func (t *TiProxyTest)RestartTiDBCluster(ctx context.Context, progressBar *progre
             if err != nil {
                 panic(err)
             }
-            //fmt.Println("Value: ", string(tidbNode.Value), "Revision: ", string(tidbNode.Key))
-            //fmt.Printf("The IP address is <%s> \n", jsonData.IP)
             tidbIPs = append(tidbIPs, jsonData.IP)
-        }else{
-            //fmt.Println("Unmatched -> Value: ", string(tidbNode.Value), "Revision: ", string(tidbNode.Key))
         }
     }
 
-    //fmt.Printf("The IP is <%#v> \n", tidbIPs)
-    ticker := time.NewTicker(time.Duration((*(*t).Args).Interval) * time.Second)
+    ticker := time.NewTicker(time.Duration((*t.Args).Interval) * time.Second)
 
     for {
          select {
              case <-ticker.C:
                  tidbIPs = append(tidbIPs[1:], tidbIPs[0])
 
-                 fmt.Printf("Restart TiDB Node<%s> \n", tidbIPs[0])
                  cmd := exec.Command("/home/admin/.tiup/bin/tiup", "cluster", "restart", "mgtest", "-y", "--node", fmt.Sprintf("%s:4000", tidbIPs[0]))
                  err := cmd.Run()
                  if err != nil {
-                     //fmt.Printf("The error is <%s> \n", err.Error())
 		     panic(err)
                  }
-                 (*t).NumOfTiDBRestart = (*t).NumOfTiDBRestart + 1
+                 t.NumOfTiDBRestart = t.NumOfTiDBRestart + 1
                  (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                     Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart, (*t).NumOfRetry),
+                     Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry),
                  }) 
              case <-ctx.Done():
                  fmt.Printf("Starting to stop all the instances \n\n\n")
                  return
          }
- 
      }
 }
 
@@ -206,9 +187,7 @@ func componentFromJSON(str string) (s Component, err error) {
 }
 
 func (t *TiProxyTest)PreProcess() {
-    //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
-    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*t.Args).DBUser, (*t.Args).DBPassword, (*t.Args).DBHost, (*t.Args).DBPort, (*t.Args).DBName))
     if err != nil {
         panic(err)
     }
@@ -225,9 +204,7 @@ func (t *TiProxyTest)PreProcess() {
 }
 
 func (t *TiProxyTest)PostProcess() {
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
-    //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
-    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*t.Args).DBUser, (*t.Args).DBPassword, (*t.Args).DBHost, (*t.Args).DBPort, (*t.Args).DBName))
     if err != nil {
         panic(err)
     }
@@ -245,8 +222,7 @@ func (t *TiProxyTest)PostProcess() {
     err = stmtOut.QueryRow().Scan(&t.InsertedRow) // WHERE number = 1
     if err != nil {
         if err.Error() == "invalid connection"{
-            //fmt.Printf("Starting to re-connect the DB \n\n\n")
-            err, stmtOut = (*t).PrepareDBConn()
+            err, stmtOut = t.PrepareDBConn()
             if err != nil  {
                 panic(err)
             }
@@ -259,11 +235,7 @@ func (t *TiProxyTest)PostProcess() {
 }
 
 func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt) {
-    //db, err := sql.Open("mysql", "root:@tcp(mgtest-acaaf60595c86139.elb.us-east-1.amazonaws.com:4000)/test")
-    //db, err := sql.Open("mysql", "root:@tcp(172.82.11.164:6000)/test")
-    connStr := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName)
-    fmt.Printf("The connection string is <%s> \n", connStr)
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*(*t).Args).DBUser, (*(*t).Args).DBPassword, (*(*t).Args).DBHost, (*(*t).Args).DBPort, (*(*t).Args).DBName))
+    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", (*t.Args).DBUser, (*t.Args).DBPassword, (*t.Args).DBHost, (*t.Args).DBPort, (*t.Args).DBName))
     if err != nil {
         panic(err)
     }
@@ -281,44 +253,39 @@ func (t *TiProxyTest)PrepareDBConn() (error, *sql.Stmt) {
 }
 
 func (t *TiProxyTest)DBInsert(pid int, wg *sync.WaitGroup, progressBar *progress.Bar, displayMsg *string ) {
-    fmt.Printf("Starting the DBInsert process ********* \n\n\n")
     defer wg.Done()
 
-    err, stmtIns := (*t).PrepareDBConn()
+    err, stmtIns := t.PrepareDBConn()
     if err != nil {
         panic(err)
     }
 
-    // Insert square numbers for 0-24 in the database
-
-    for i := 0; i < (*(*t).Args).Rows ; i++ {
+    for i := 0; i < (t.Args).Rows ; i++ {
         if i%10000 == 0 {
-            (*t).InsertedRow = i
+            t.InsertedRow = i
             (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart, (*t).NumOfRetry ),
+                Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
             }) 
         }
         _, err := stmtIns.Exec(pid, i, (i + i)) // Insert tuples (i, i + i)
         if err != nil {
             if err.Error() == "invalid connection"{
                 fmt.Printf("Starting to re-connect the DB \n\n\n")
-                err, stmtIns = (*t).PrepareDBConn()
+                err, stmtIns = t.PrepareDBConn()
 		if err != nil {
                     panic(err)
 	        }
 		i = i - 1
 		LK.Lock()
-                (*t).NumOfRetry = (*t).NumOfRetry + 1
+                t.NumOfRetry = t.NumOfRetry + 1
                 (*progressBar).UpdateDisplay(&progress.DisplayProps{
-                    Prefix: fmt.Sprintf(*displayMsg, (*t).InsertedRow, (*t).NumOfTiDBRestart,  (*t).NumOfRetry ),
+                    Prefix: fmt.Sprintf(*displayMsg, t.InsertedRow, t.NumOfTiDBRestart, t.NumOfRetry ),
                 }) 
 		LK.Unlock()
 
 	    } else{
-                //fmt.Printf("The error is <%s>\n\n\n", err.Error())
                 panic(err.Error()) // proper error handling instead of panic in your app
 	    }
         }
     }
-
 }

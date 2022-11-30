@@ -1,0 +1,2 @@
+* Overview
+This demo is to show how TiProxy helps to migrate connection session from one TiDB node to another. It will make the TiDB version upgrade real no downtime

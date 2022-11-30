@@ -1,2 +1,82 @@
-* Overview
-This demo is to show how TiProxy helps to migrate connection session from one TiDB node to another. It will make the TiDB version upgrade real no downtime
+* Test for TiProxy
+
+
+  
+** Table preparation
+   #+BEGIN_SRC
+MySQL$ create table tiproxy_test(pid bigint not null, id bigint not null, col02 bigint, primary key(pid, id));
+   #+END_SRC
+* TiProxy Config
+  #+BEGIN_SRC
+workdir: "./work"
+proxy:
+  addr: "0.0.0.0:6000"
+  tcp-keep-alive: true
+  max-connections: 1000
+  pd-addrs: "182.83.2.211:2379"
+  require-backend-tls: false
+metrics:
+api:
+  addr: "0.0.0.0:3080"
+  enable-basic-auth: false
+  user: ""
+  password: ""
+log:
+  level: "info"
+  encoder: "tidb"
+  log-file:
+    filename: ""
+    max-size: 300
+    max-days: 1
+    max-backups: 1
+security:
+  rsa-key-size: 4096
+  cluster-tls: # client object
+  sql-tls: # client object
+    skip-ca: true
+  server-tls: # server object
+  peer-tls: # peer object
+advance:
+  #+END_SRC
+** Command startup
+   #+BEGIN_SRC
+OhMyTiUP$ ./bin/tiproxy --config=/tmp/config.ssl.toml
+   #+END_SRC
+* Troubleshooting
+** Session migration failure
+   The TiDB have to setup the TLS communication protocol.
+ #+BEGIN_SRC
+ [2022/11/21 04:10:36.415 +00:00] [WARN] [main.proxy.conn.be] [backend/backend_conn_mgr.go:373] [redirect connection failed] [connID=0] [remoteAddr=172.82.11.164:52146] [from=182.83.
+ 2.92:4000] [to=182.83.1.182:4000] [redirect_err="ERROR 8146 (HY000): cannot migrate the current session: the token must be queried with secure transport"] 
+ #+END_SRC
+
+
+*** tiup cluster edit-config
+    Please find the link [[https://docs.pingcap.com/tidb/v5.2/enable-tls-between-clients-and-servers][tls between clients and servers]] for reference.
+   #+BEGIN_SRC
+ server_configs:
+   tidb:
+ ... ...
+     graceful-wait-before-shutdown: 10
+     security:
+       auto-tls: true
+       session-token-signing-cert: /tmp/tls/server-cert.pem
+       session-token-signing-key: /tmp/tls/server-key.pem
+       ssl-ca: /tmp/tls/ca-cert.pem
+       ssl-cert: /tmp/tls/server-cert.pem
+       ssl-key: /tmp/tls/server-key.pem
+   #+END_SRC
+** tiup cluster edit-config
+   Now tiproxy only support grace restart. It helps the schedules DB restart like DB upgrade.
+   #+BEGIN_SRC
+require-backend-tls: true
+   #+END_SRC
+** The session-token-x is designed after v6.4.0
+   After TLS setup, the error has not gone. After refering to the source code, the parameter [session-token-signing-cert] and [session-token-signing-key] is supported from v6.4.0. The issue is resolved after versionup.
+   #+BEGIN_SRC
+[2022/11/21 04:48:42.029 +00:00] [WARN] [main.proxy.conn.be] [backend/backend_conn_mgr.go:373] [redirect connection failed] [connID=0] [remoteAddr=172.82.11.164:48386] [from=182.83.
+1.182:4000] [to=182.83.2.92:4000] [_err="ERROR 8146 (HY000): cannot migrate the current session: no certificate or key file to sign the data"] 
+   #+END_SRC
+* Reference
+  + TiProxy: https://github.com/pingcap/TiProxy
+  + youtube: https://www.youtube.com/watch?v=Hka0eBtRID4
